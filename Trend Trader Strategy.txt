@@ -1,0 +1,123 @@
+//@version=4
+strategy("Trend Trader Strategy (v4 FINAL FIX)", shorttitle="TT Strat",
+     overlay=true, initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0)
+
+// ===== Inputs =====
+showBuySell   = input(true,  title="Show Buy/Sell Labels")
+src           = input(close, title="Source")
+
+// MACD
+fast_length   = input(12,  title="Fast Length")
+slow_length   = input(26,  title="Slow Length")
+signal_length = input(9,   title="Signal Smoothing")
+
+// ADX
+adxlen     = input(14,  title="ADX Length")
+dilen      = input(14,  title="DI Length")
+adx_thresh = input(25.0,title="ADX Threshold")
+
+// Exit mode
+exitMode = input(title="Exit Mode", defval="Opposite Sell",
+     options=["Opposite Sell","MACD CrossDown","ADX Falls Below Threshold","None"])
+
+// Risk management
+useSLTP  = input(true,  title="Use SL/TP")
+slPerc   = input(0.0,   title="Stop Loss %", step=0.1, minval=0.0)
+tpPerc   = input(0.0,   title="Take Profit %", step=0.1, minval=0.0)
+
+// ===== MACD =====
+fast_ma = ema(src, fast_length)
+slow_ma = ema(src, slow_length)
+macd    = fast_ma - slow_ma
+signal  = ema(macd, signal_length)
+hist    = macd - signal
+
+// ===== ADX =====
+dirmov(len) =>
+    up = change(close)
+    down = -change(close)
+    plusDM  = na(up)   ? na : (up   > down and up   > 0 ? up   : 0)
+    minusDM = na(down) ? na : (down > up   and down > 0 ? down : 0)
+    truerange = rma(tr, len)
+    plus  = fixnan(100 * rma(plusDM,  len) / truerange)
+    minus = fixnan(100 * rma(minusDM, len) / truerange)
+    [plus, minus]
+
+adx(diLen, adxLen) =>
+    [plus, minus] = dirmov(diLen)
+    sum = plus + minus
+    100 * rma(abs(plus - minus) / (sum == 0 ? 1 : sum), adxLen)
+
+sig = adx(dilen, adxlen)
+
+// ===== Signals =====
+macd_crossup   = macd < 0 and crossover(macd, signal)
+macd_crossdown = macd > 0 and crossover(signal, macd)
+bullish = sig > adx_thresh and macd_crossup
+bearish = sig > adx_thresh and macd_crossdown
+
+// ===== Visual labels =====
+plotshape(bullish and showBuySell, title="Buy",  text="Buy",
+     color=color.lime, style=shape.labelup,   location=location.belowbar,
+     size=size.small, textcolor=color.black)
+plotshape(bearish and showBuySell, title="Sell", text="Sell",
+     color=color.red,  style=shape.labeldown, location=location.abovebar,
+     size=size.small, textcolor=color.black)
+
+// ===== Strategy logic =====
+if (bullish)
+    strategy.entry("Long", strategy.long)
+
+exitByOpposite = exitMode == "Opposite Sell"             and bearish
+exitByMacdDown = exitMode == "MACD CrossDown"            and macd_crossdown
+exitByAdxDrop  = exitMode == "ADX Falls Below Threshold" and (sig < adx_thresh)
+
+if (strategy.position_size > 0 and (exitByOpposite or exitByMacdDown or exitByAdxDrop))
+    strategy.close("Long", comment="Exit: " + exitMode)
+
+// SL/TP
+if (useSLTP)
+    longPrice = strategy.position_avg_price
+    slPrice   = slPerc > 0 ? longPrice * (1 - slPerc/100.0) : na
+    tpPrice   = tpPerc > 0 ? longPrice * (1 + tpPerc/100.0) : na
+    strategy.exit("LX", from_entry="Long", stop=slPrice, limit=tpPrice)
+
+// ===== Bar color =====
+ema1 = 50
+usedEma = ema(close, ema1)
+emaUpColor()   => hlc3 >= usedEma
+emaDownColor() => hlc3  < usedEma
+barcolor(emaUpColor() ? color.lime : emaDownColor() ? color.red : na)
+
+// ===== MA Ribbon (з повним фіксом) =====
+useCurrentRes = true
+resC      = "W"
+ribbonTF  = useCurrentRes ? timeframe.period : resC     // ✅ period → timeframe.period
+ribbonPrice = security(syminfo.tickerid, ribbonTF, close)
+
+shortperiod = 50
+longperiod  = 100
+smoothinput = 2
+
+maCalc(srcSeries, len) =>
+    var float m = na
+    if smoothinput == 1
+        m := sma(srcSeries, len)
+    else if smoothinput == 2
+        m := ema(srcSeries, len)
+    else if smoothinput == 3
+        m := wma(srcSeries, len)
+    else if smoothinput == 4
+        m := linreg(srcSeries, len, 0)
+    m
+
+maShort = maCalc(ribbonPrice, shortperiod)
+maLong  = maCalc(ribbonPrice, longperiod)
+
+shortcolor = maShort > maShort[1] ? color.lime : maShort < maShort[1] ? color.red : color.blue
+longcolor  = maLong  > maLong[1]  ? color.lime : maLong  < maLong[1]  ? color.red : color.blue
+
+MA1 = plot(maShort, title="Short Period", style=plot.style_linebr, linewidth=2, color=shortcolor)
+MA2 = plot(maLong,  title="Long Period",  style=plot.style_linebr, linewidth=4, color=longcolor)
+fill(MA1, MA2, color=color.silver, transp=50)
